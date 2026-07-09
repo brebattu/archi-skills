@@ -7,3 +7,9 @@ spring:
 
 server:
   port: 8080
+
+logging:
+  pattern:
+    # %X{key} pulls MDC values set by GlobalExceptionHandler (errorCode, incidentId) into every
+    # log line emitted while they're set, so log aggregation can filter/query on them as fields.
+    console: "%d{yyyy-MM-dd HH:mm:ss} %-5level [%X{incidentId:-} %X{errorCode:-}] %logger{36} - %msg%n"

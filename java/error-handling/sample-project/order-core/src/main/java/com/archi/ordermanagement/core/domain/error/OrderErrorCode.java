@@ -13,7 +13,8 @@ public enum OrderErrorCode implements ErrorCode {
     ORDER_NOT_FOUND,
     INVALID_CUSTOMER_ID,
     INVALID_ORDER_AMOUNT,
-    ORDER_ALREADY_CANCELLED;
+    ORDER_ALREADY_CANCELLED,
+    ORDER_CREATED_NOTIFICATION_FAILED;
 
     @Override
     public String code() {

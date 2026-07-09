@@ -4,8 +4,10 @@ import com.archi.errorhandling.FunctionalException;
 import com.archi.errorhandling.TechnicalException;
 import com.archi.ordermanagement.core.domain.error.OrderErrorCode;
 import java.util.List;
+import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -32,13 +34,32 @@ public class GlobalExceptionHandler {
         // Safe here: order-api only ever handles order-core's ErrorCode implementation. A second
         // bounded context would need its own handler/switch over its own ErrorCode type.
         HttpStatus status = toHttpStatus((OrderErrorCode) ex.errorCode());
-        return ProblemDetail.forStatusAndDetail(status, ex.getMessage());
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, ex.getMessage());
+        problem.setProperty("code", ex.errorCode().code());
+        return problem;
     }
 
     @ExceptionHandler(TechnicalException.class)
     public ProblemDetail handleTechnical(TechnicalException ex) {
-        log.error("Technical error [{}]", ex.errorCode().code(), ex);
-        return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "Technical error");
+        String incidentId = UUID.randomUUID().toString();
+        // MDC keys picked up by the console pattern (see order-bootstrap's application.yml), so
+        // log aggregation can filter/query on errorCode/incidentId as structured fields instead of
+        // grepping free text.
+        MDC.put("errorCode", ex.errorCode().code());
+        MDC.put("incidentId", incidentId);
+        try {
+            log.error("Technical error", ex);
+        } finally {
+            MDC.remove("errorCode");
+            MDC.remove("incidentId");
+        }
+
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "Technical error");
+        problem.setProperty("code", ex.errorCode().code());
+        // Returned to the client so a support ticket referencing this id can be grepped straight
+        // out of the logs, without needing to expose the raw exception detail.
+        problem.setProperty("incidentId", incidentId);
+        return problem;
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -63,6 +84,7 @@ public class GlobalExceptionHandler {
             case ORDER_NOT_FOUND -> HttpStatus.NOT_FOUND;
             case ORDER_ALREADY_CANCELLED -> HttpStatus.CONFLICT;
             case INVALID_CUSTOMER_ID, INVALID_ORDER_AMOUNT -> HttpStatus.BAD_REQUEST;
+            case ORDER_CREATED_NOTIFICATION_FAILED -> HttpStatus.BAD_GATEWAY;
         };
     }
 }

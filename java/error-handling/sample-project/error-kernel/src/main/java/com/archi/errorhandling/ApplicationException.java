@@ -24,4 +24,15 @@ public abstract sealed class ApplicationException extends RuntimeException
     public ErrorCode errorCode() {
         return errorCode;
     }
+
+    /**
+     * Checks the carried error code against a raw code string rather than a Java type. Lets a
+     * caller react to a specific incident (e.g. a module deciding how to handle a failure coming
+     * from another module's port) without a compile-time dependency on that module's own
+     * ErrorCode enum. Trade-off: no compiler-checked consistency between the string used here and
+     * the enum constant it is meant to match — a typo on either side fails silently at runtime.
+     */
+    public boolean hasErrorCode(String code) {
+        return errorCode.code().equals(code);
+    }
 }

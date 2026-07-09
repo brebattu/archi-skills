@@ -184,15 +184,103 @@ Discutées avant d'écrire la moindre ligne de code, pour garder trace du "pourq
   Spring, l'embarquer dans l'enum ferait fuiter Spring dans `order-core`, qui doit rester
   framework-agnostic.
 
+## Tester la gestion d'erreur
+
+Deux mécanismes de test complémentaires, chacun avec un rôle précis : l'un prouve le comportement
+HTTP réel, l'autre empêche mécaniquement de contourner les règles ci-dessus.
+
+### Tests WebMvc (`OrderControllerTest`) — le comportement HTTP réel
+
+Le switch exhaustif de `GlobalExceptionHandler` garantit que tous les cas sont couverts, mais pas
+qu'ils le sont *correctement* (rien n'empêche une faute de frappe du style
+`ORDER_ALREADY_CANCELLED -> HttpStatus.BAD_REQUEST` au lieu de `CONFLICT`). `@WebMvcTest` comble ce
+trou en démarrant une vraie tranche web Spring.
+
+```java
+@WebMvcTest(OrderController.class)
+class OrderControllerTest {
+
+    @Autowired private MockMvc mockMvc;
+    @MockitoBean private GetOrderUseCase getOrderUseCase;
+    // ... les 4 autres use cases, aussi en @MockitoBean
+
+    @Test
+    void should_return404WithErrorCode_when_orderNotFound() throws Exception {
+        UUID orderId = UUID.randomUUID();
+        when(getOrderUseCase.getOrder(orderId))
+                .thenThrow(new FunctionalException(OrderErrorCode.ORDER_NOT_FOUND, "Order not found: " + orderId));
+
+        mockMvc.perform(get("/api/orders/{id}", orderId))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("ORDER_NOT_FOUND"));
+    }
+}
+```
+
+`@WebMvcTest(OrderController.class)` charge la tranche web réelle : le contrôleur cité, plus tout ce
+qui est annoté `@RestController`/`@RestControllerAdvice` — donc `GlobalExceptionHandler` est chargé
+**pour de vrai, pas mocké** (sinon le test ne prouverait rien sur le vrai mapping). Seules les
+dépendances hors couche web — les 5 use cases d'`order-core`, injectés dans le contrôleur — sont
+remplacées par des `@MockitoBean`, parce que `@WebMvcTest` ne les instancie jamais.
+
+Point d'attention pratique : `order-api` est un module bibliothèque, sans `@SpringBootApplication` à
+lui (celle-ci vit dans `order-bootstrap`). `@WebMvcTest` a besoin d'en trouver une en remontant les
+packages depuis le test — d'où une petite classe `TestApplication` dédiée, présente uniquement dans
+`src/test` d'`order-api` (jamais livrée dans le jar de production).
+
+### Tests d'architecture (`ArchitectureRulesTest`, ArchUnit) — les règles jamais contournées
+
+Les conventions décrites plus haut ("un enum par module", "chaque adapter traduit ses propres
+erreurs techniques", "pas d'exception par cas d'usage"...) ne sont que du texte tant que rien ne les
+fait respecter. [ArchUnit](https://www.archunit.org/) lit les `.class` compilés et vérifie des
+règles de dépendance entre packages/classes, comme un test JUnit normal — si la règle est violée, le
+test échoue avec le détail de la dépendance fautive.
+
+```java
+class ArchitectureRulesTest {
+
+    private static final JavaClasses CLASSES = new ClassFileImporter().importPackages("com.archi");
+
+    @Test
+    void orderCoreMustNotDependOnSpring() {
+        ArchRule rule = noClasses()
+                .that().resideInAPackage("com.archi.ordermanagement.core..")
+                .should().dependOnClassesThat().resideInAnyPackage("org.springframework..");
+
+        rule.check(CLASSES);
+    }
+}
+```
+
+Ce test vit dans `order-bootstrap` : c'est le seul module qui a tous les autres (et `error-kernel`)
+sur son classpath de test, puisque c'est son rôle d'assembler l'application entière.
+
+| Règle | Ce qu'elle empêche |
+|---|---|
+| `orderCoreMustNotDependOnSpring` | Un import Spring qui se glisse dans `order-core`. |
+| `dataAccessExceptionMustStayConfinedToPersistenceAdapter` | `DataAccessException` capturée ailleurs qu'à sa frontière (`order-persistence`). |
+| `kafkaExceptionMustStayConfinedToMessagingAdapter` | Idem pour `KafkaException` et `order-messaging-kafka`. |
+| `onlyOneCentralizedExceptionHandlerMustExist` | Un second `@RestControllerAdvice` qui disperserait la gestion d'erreur. |
+| `onlyErrorKernelMayDefineNewExceptionTypes` | Un retour en arrière vers "une exception par cas d'usage" (`class XyzException extends RuntimeException` en dehors d'`error-kernel`). |
+| `apiMustNotDependOnPersistenceOrMessaging` | `order-api` qui utiliserait directement `OrderEntity`/`OrderJpaRepository` au lieu de passer par un port. |
+| `persistenceMustNotDependOnMessaging` | Un adapter qui dépendrait directement d'un autre adapter. |
+| `messagingMustNotDependOnPersistence` | Idem, sens inverse. |
+
+Les 4 dernières règles répondent directement à une faiblesse identifiée en construisant ce projet :
+avant elles, rien n'empêchait mécaniquement "n'importe qui" de réutiliser une classe d'un autre
+module (ex. `order-api` import direct d'`OrderEntity`) ou de recréer le pattern "exception par cas"
+qu'on a explicitement écarté — seule la documentation le disait.
+
 ## Build / vérification
 
 ```bash
 mvn -q -pl error-kernel,order-core,order-api,order-persistence,order-messaging-kafka,order-bootstrap -am compile
-mvn -q -pl error-kernel,order-core test
+mvn -q -pl error-kernel,order-core,order-api,order-bootstrap test
 ```
 
-Aucune base de données, broker Kafka ou Docker n'est nécessaire pour compiler et faire passer les
-tests de ce squelette (JUnit 5 + Mockito, sans contexte Spring).
+Aucune base de données ni broker Kafka réel n'est nécessaire pour compiler et faire passer les tests
+de ce squelette : JUnit 5 + Mockito (`error-kernel`, `order-core`), `@WebMvcTest`/MockMvc sans
+serveur réel (`order-api`), ArchUnit sur les `.class` compilés (`order-bootstrap`). Pas de Docker.
 
 ## Notes de version
 
