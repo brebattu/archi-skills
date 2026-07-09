@@ -1,0 +1,9 @@
+spring:
+  application:
+    name: order-management
+  jpa:
+    hibernate:
+      ddl-auto: validate
+
+server:
+  port: 8080

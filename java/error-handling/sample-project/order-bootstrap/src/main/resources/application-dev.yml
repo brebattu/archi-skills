@@ -1,0 +1,9 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/order_management
+    username: order_management
+    password: order_management
+  jpa:
+    show-sql: true
+  kafka:
+    bootstrap-servers: localhost:9092

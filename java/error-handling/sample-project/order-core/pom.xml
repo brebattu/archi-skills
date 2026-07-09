@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.archi.ordermanagement</groupId>
+        <artifactId>order-management-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>order-core</artifactId>
+    <packaging>jar</packaging>
+    <name>order-core</name>
+    <description>
+        Application core (domain + use cases + ports). No Spring dependency on purpose: this
+        module must stay framework-agnostic to preserve the hexagonal boundary.
+    </description>
+
+    <!--
+        No production dependency on Spring. Test-only dependencies below rely on versions
+        already managed by the inherited spring-boot-dependencies BOM.
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>com.archi.errorhandling</groupId>
+            <artifactId>error-kernel</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
