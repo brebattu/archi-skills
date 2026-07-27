@@ -1,8 +1,10 @@
 package com.archi.ordermanagement.persistence.adapter;
 
+import com.archi.errorhandling.FunctionalException;
 import com.archi.errorhandling.TechnicalException;
 import com.archi.ordermanagement.core.application.port.out.OrderRepositoryPort;
 import com.archi.ordermanagement.core.domain.Order;
+import com.archi.ordermanagement.core.domain.error.OrderErrorCode;
 import com.archi.ordermanagement.core.domain.paging.PageResult;
 import com.archi.ordermanagement.persistence.error.OrderPersistenceErrorCode;
 import com.archi.ordermanagement.persistence.jpa.OrderEntity;
@@ -11,6 +13,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.stereotype.Component;
 
@@ -25,7 +28,11 @@ import org.springframework.stereotype.Component;
  *
  * <p>This adapter owns the translation of its own technical failures: a raw {@link
  * DataAccessException} must never reach the API layer, or it would be mistaken for a bug by the
- * generic catch-all handler instead of a known, retryable infrastructure failure.
+ * generic catch-all handler instead of a known, retryable infrastructure failure. One signal is an
+ * exception, though: a primary-key {@link DataIntegrityViolationException} has a single possible
+ * business meaning on its own ("this order already exists"), so {@link #save} throws it directly
+ * with order-core's own {@link OrderErrorCode}, instead of wrapping it as a persistence-specific
+ * technical failure that order-core would then have to re-interpret. See README point 6.
  */
 @Component
 public class OrderRepositoryAdapter implements OrderRepositoryPort {
@@ -38,7 +45,15 @@ public class OrderRepositoryAdapter implements OrderRepositoryPort {
 
     @Override
     public Order save(Order order) {
-        return executeOrThrowTechnical(() -> toDomain(orderJpaRepository.save(toEntity(order))));
+        try {
+            return toDomain(orderJpaRepository.save(toEntity(order)));
+        } catch (DataIntegrityViolationException e) {
+            throw new FunctionalException(OrderErrorCode.ORDER_ALREADY_EXISTS,
+                    "Order " + order.id() + " already exists", e);
+        } catch (DataAccessException e) {
+            throw new TechnicalException(OrderPersistenceErrorCode.ORDER_PERSISTENCE_FAILURE,
+                    "Order persistence operation failed", e);
+        }
     }
 
     @Override

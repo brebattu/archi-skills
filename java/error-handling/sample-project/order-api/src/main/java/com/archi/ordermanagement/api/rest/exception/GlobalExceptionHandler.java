@@ -31,11 +31,14 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(FunctionalException.class)
     public ProblemDetail handleFunctional(FunctionalException ex) {
-        // Safe here: order-api only ever handles order-core's ErrorCode implementation. A second
-        // bounded context would need its own handler/switch over its own ErrorCode type.
+        // Safe here: every FunctionalException carries an order-core OrderErrorCode, whether
+        // thrown by order-core itself or by an adapter translating a technical signal directly at
+        // its own boundary (see README point 6) — the handler doesn't need to know which. A
+        // second bounded context would need its own handler/switch over its own ErrorCode type.
         HttpStatus status = toHttpStatus((OrderErrorCode) ex.errorCode());
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, ex.getMessage());
         problem.setProperty("code", ex.errorCode().code());
+        problem.setProperty("reference", ex.errorCode().reference());
         return problem;
     }
 
@@ -43,19 +46,23 @@ public class GlobalExceptionHandler {
     public ProblemDetail handleTechnical(TechnicalException ex) {
         String incidentId = UUID.randomUUID().toString();
         // MDC keys picked up by the console pattern (see order-bootstrap's application.yml), so
-        // log aggregation can filter/query on errorCode/incidentId as structured fields instead of
-        // grepping free text.
+        // log aggregation can filter/query on errorCode/errorReference/incidentId as structured
+        // fields instead of grepping free text. errorReference groups every occurrence of the same
+        // case over time (e.g. "how many ORD-101-0001 this hour?"); incidentId pins down this one.
         MDC.put("errorCode", ex.errorCode().code());
+        MDC.put("errorReference", ex.errorCode().reference());
         MDC.put("incidentId", incidentId);
         try {
             log.error("Technical error", ex);
         } finally {
             MDC.remove("errorCode");
+            MDC.remove("errorReference");
             MDC.remove("incidentId");
         }
 
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "Technical error");
         problem.setProperty("code", ex.errorCode().code());
+        problem.setProperty("reference", ex.errorCode().reference());
         // Returned to the client so a support ticket referencing this id can be grepped straight
         // out of the logs, without needing to expose the raw exception detail.
         problem.setProperty("incidentId", incidentId);
@@ -82,7 +89,7 @@ public class GlobalExceptionHandler {
     private static HttpStatus toHttpStatus(OrderErrorCode errorCode) {
         return switch (errorCode) {
             case ORDER_NOT_FOUND -> HttpStatus.NOT_FOUND;
-            case ORDER_ALREADY_CANCELLED -> HttpStatus.CONFLICT;
+            case ORDER_ALREADY_CANCELLED, ORDER_ALREADY_EXISTS -> HttpStatus.CONFLICT;
             case INVALID_CUSTOMER_ID, INVALID_ORDER_AMOUNT -> HttpStatus.BAD_REQUEST;
             case ORDER_CREATED_NOTIFICATION_FAILED -> HttpStatus.BAD_GATEWAY;
         };

@@ -35,6 +35,11 @@ class OrderServiceTest {
         public String code() {
             return name();
         }
+
+        @Override
+        public String reference() {
+            return "ORD-102-0001";
+        }
     }
 
     @Mock

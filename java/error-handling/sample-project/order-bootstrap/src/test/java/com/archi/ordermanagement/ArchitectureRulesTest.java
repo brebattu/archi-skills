@@ -88,6 +88,25 @@ class ArchitectureRulesTest {
         rule.check(CLASSES);
     }
 
+    /**
+     * The reverse of {@link #apiMustNotDependOnPersistenceOrMessaging}: order-core is allowed to
+     * be depended on by every adapter (that's the point of the hexagon), but never the other way
+     * round, even though an adapter is allowed to throw a {@code FunctionalException} carrying an
+     * order-core {@code OrderErrorCode} directly (README point 6 — e.g.
+     * {@code OrderRepositoryAdapter} throwing {@code OrderErrorCode.ORDER_ALREADY_EXISTS}). That
+     * pattern only works one-way: order-core must still never import an adapter's own types.
+     */
+    @Test
+    void orderCoreMustNotDependOnPersistenceOrMessaging() {
+        ArchRule rule = noClasses()
+                .that().resideInAPackage("com.archi.ordermanagement.core..")
+                .should().dependOnClassesThat().resideInAnyPackage(
+                        "com.archi.ordermanagement.persistence..",
+                        "com.archi.ordermanagement.messaging..");
+
+        rule.check(CLASSES);
+    }
+
     @Test
     void persistenceMustNotDependOnMessaging() {
         ArchRule rule = noClasses()

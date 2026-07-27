@@ -1,5 +1,6 @@
 package com.archi.ordermanagement.api.rest;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -16,6 +17,7 @@ import com.archi.ordermanagement.core.application.port.in.DeleteOrderUseCase;
 import com.archi.ordermanagement.core.application.port.in.GetOrderUseCase;
 import com.archi.ordermanagement.core.application.port.in.ListOrdersUseCase;
 import com.archi.ordermanagement.core.domain.error.OrderErrorCode;
+import java.math.BigDecimal;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -40,6 +42,11 @@ class OrderControllerTest {
         @Override
         public String code() {
             return name();
+        }
+
+        @Override
+        public String reference() {
+            return "TST-999-0001";
         }
     }
 
@@ -69,6 +76,7 @@ class OrderControllerTest {
         mockMvc.perform(get("/api/orders/{id}", orderId))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("ORDER_NOT_FOUND"))
+                .andExpect(jsonPath("$.reference").value("ORD-001-0001"))
                 .andExpect(jsonPath("$.detail").value("Order not found: " + orderId));
     }
 
@@ -80,7 +88,25 @@ class OrderControllerTest {
 
         mockMvc.perform(post("/api/orders/{id}/cancel", orderId))
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.code").value("ORDER_ALREADY_CANCELLED"));
+                .andExpect(jsonPath("$.code").value("ORDER_ALREADY_CANCELLED"))
+                .andExpect(jsonPath("$.reference").value("ORD-001-0004"));
+    }
+
+    @Test
+    void should_return409_when_orderAlreadyExists() throws Exception {
+        // Simulates order-persistence's OrderRepositoryAdapter throwing this OrderErrorCode
+        // directly (see README point 6): order-api's handler doesn't distinguish it from a case
+        // thrown by order-core itself.
+        when(createOrderUseCase.createOrder(any()))
+                .thenThrow(new FunctionalException(OrderErrorCode.ORDER_ALREADY_EXISTS, "Order already exists"));
+        String body = objectMapper.writeValueAsString(new CreateOrderRequest("customer-1", BigDecimal.TEN));
+
+        mockMvc.perform(post("/api/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("ORDER_ALREADY_EXISTS"))
+                .andExpect(jsonPath("$.reference").value("ORD-001-0006"));
     }
 
     @Test
@@ -105,6 +131,7 @@ class OrderControllerTest {
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.detail").value("Technical error"))
                 .andExpect(jsonPath("$.code").value("SIMULATED_INFRA_FAILURE"))
+                .andExpect(jsonPath("$.reference").value("TST-999-0001"))
                 .andExpect(jsonPath("$.incidentId").exists());
     }
 

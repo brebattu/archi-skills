@@ -10,14 +10,30 @@ import com.archi.errorhandling.ErrorCode;
  */
 public enum OrderErrorCode implements ErrorCode {
 
-    ORDER_NOT_FOUND,
-    INVALID_CUSTOMER_ID,
-    INVALID_ORDER_AMOUNT,
-    ORDER_ALREADY_CANCELLED,
-    ORDER_CREATED_NOTIFICATION_FAILED;
+    ORDER_NOT_FOUND("ORD-001-0001"),
+    INVALID_CUSTOMER_ID("ORD-001-0002"),
+    INVALID_ORDER_AMOUNT("ORD-001-0003"),
+    ORDER_ALREADY_CANCELLED("ORD-001-0004"),
+    ORDER_CREATED_NOTIFICATION_FAILED("ORD-001-0005"),
+    // Thrown by order-persistence's OrderRepositoryAdapter, not by order-core itself: a PK
+    // constraint violation has a single possible business meaning ("this order already exists")
+    // and order-persistence has no ErrorCode of its own to spend on a core-owned case. See
+    // README point 6.
+    ORDER_ALREADY_EXISTS("ORD-001-0006");
+
+    private final String reference;
+
+    OrderErrorCode(String reference) {
+        this.reference = reference;
+    }
 
     @Override
     public String code() {
         return name();
+    }
+
+    @Override
+    public String reference() {
+        return reference;
     }
 }

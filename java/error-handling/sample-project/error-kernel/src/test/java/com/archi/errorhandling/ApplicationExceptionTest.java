@@ -18,6 +18,11 @@ class ApplicationExceptionTest {
         public String code() {
             return name();
         }
+
+        @Override
+        public String reference() {
+            return "TST-000-0001";
+        }
     }
 
     @Test
