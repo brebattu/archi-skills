@@ -55,17 +55,29 @@ d'autres projets.
    connaît que ses propres pannes. `order-core` ne doit jamais contenir de valeur qu'il ne lance
    pas lui-même (piège identifié et corrigé une fois pendant la construction de ce squelette : les
    codes techniques avaient d'abord été mis à tort dans l'enum du domaine).
-6. **Le mapping HTTP reste hors du domaine.** `ErrorCode` ne porte pas de `HttpStatus` : ce type
+6. **Un adapter peut lancer directement le `FunctionalException` du cœur applicatif quand un
+   signal technique n'a qu'une seule interprétation métier possible.** Cas concret :
+   `OrderRepositoryAdapter.save` intercepte `DataIntegrityViolationException` (violation de
+   contrainte de clé primaire) et lance directement `new
+   FunctionalException(OrderErrorCode.ORDER_ALREADY_EXISTS, ...)`, au lieu de l'envelopper dans son
+   propre `TechnicalException` comme au point 8 : la contrainte PK ne peut signifier qu'une seule
+   chose ("cette commande existe déjà"), et `order-persistence` n'a pas de code d'erreur
+   fonctionnel à lui pour porter un cas qui appartient au domaine `order-core`. Ce raccourci ne
+   fonctionne que dans un sens : un adapter a le droit de dépendre de l'`ErrorCode` du cœur qu'il
+   sert, mais `order-core` ne doit jamais dépendre en retour d'un type d'adapter — garanti par
+   `orderCoreMustNotDependOnPersistenceOrMessaging` (voir tests d'architecture plus bas).
+7. **Le mapping HTTP reste hors du domaine.** `ErrorCode` ne porte pas de `HttpStatus` : ce type
    vient de Spring, et `order-core` doit rester zéro-dépendance Spring. Le mapping
    `ErrorCode → HttpStatus` vit uniquement dans `order-api`, sous forme de **switch expression
    exhaustif sans `default`** : si on ajoute une valeur à l'enum sans la mapper, le compilateur
    refuse de compiler. C'est une garantie gratuite, sans avoir besoin de sealed interfaces.
-7. **Chaque adapter traduit ses propres pannes techniques à sa frontière.** `order-persistence`
+8. **Chaque adapter traduit ses propres pannes techniques à sa frontière.** `order-persistence`
    attrape les `DataAccessException` de Spring Data et les retraduit en `TechnicalException`
    avant qu'elles ne remontent ; `order-messaging-kafka` fait de même avec `KafkaException`. Une
    exception technique connue ne doit jamais remonter brute jusqu'à l'API, sinon elle tomberait à
-   tort dans le bucket "bug" du handler générique.
-8. **La validation de requête est hors hiérarchie.** `MethodArgumentNotValidException` (levée par
+   tort dans le bucket "bug" du handler générique. (Exception à cette règle : le cas fonctionnel
+   univoque décrit au point 6.)
+9. **La validation de requête est hors hiérarchie.** `MethodArgumentNotValidException` (levée par
    Spring avant même d'atteindre un use case, sur un `@Valid` qui échoue) n'est pas une violation
    de règle métier : c'est une requête HTTP malformée. Elle a son propre handler dédié, distinct de
    `FunctionalException`.
@@ -75,6 +87,9 @@ d'autres projets.
 ```java
 public interface ErrorCode {
     String code();
+
+    // Référence stable CTX-MOD-SEQ (ex. ORD-001-0003) — voir "Référence stable" plus bas.
+    String reference();
 }
 
 public abstract sealed class ApplicationException extends RuntimeException
@@ -100,20 +115,62 @@ dans un module métier.
 
 | Module                  | Enum                       | Exemples de valeurs                                              | Lancé par |
 |--------------------------|-----------------------------|--------------------------------------------------------------------|-----------|
-| `order-core`             | `OrderErrorCode`            | `ORDER_NOT_FOUND`, `ORDER_ALREADY_CANCELLED`, `INVALID_CUSTOMER_ID`, `INVALID_ORDER_AMOUNT` | `Order.java`, `OrderService.java` |
+| `order-core`             | `OrderErrorCode`            | `ORDER_NOT_FOUND`, `ORDER_ALREADY_CANCELLED`, `INVALID_CUSTOMER_ID`, `INVALID_ORDER_AMOUNT`, `ORDER_ALREADY_EXISTS` | `Order.java`, `OrderService.java`, et `OrderRepositoryAdapter.java` (voir point 6) |
 | `order-persistence`       | `OrderPersistenceErrorCode` | `ORDER_PERSISTENCE_FAILURE`                                        | `OrderRepositoryAdapter.java` |
 | `order-messaging-kafka`   | `OrderMessagingErrorCode`   | `ORDER_EVENT_PUBLISHING_FAILURE`                                    | `OrderEventPublisherAdapter.java` |
 
-Chaque enum implémente simplement `ErrorCode` :
+Chaque enum implémente `ErrorCode` en fixant sa référence par constante :
 
 ```java
 public enum OrderErrorCode implements ErrorCode {
-    ORDER_NOT_FOUND, INVALID_CUSTOMER_ID, INVALID_ORDER_AMOUNT, ORDER_ALREADY_CANCELLED;
+    ORDER_NOT_FOUND("ORD-001-0001"),
+    INVALID_CUSTOMER_ID("ORD-001-0002"),
+    INVALID_ORDER_AMOUNT("ORD-001-0003"),
+    ORDER_ALREADY_CANCELLED("ORD-001-0004"),
+    ORDER_CREATED_NOTIFICATION_FAILED("ORD-001-0005"),
+    ORDER_ALREADY_EXISTS("ORD-001-0006");
+
+    private final String reference;
+
+    OrderErrorCode(String reference) { this.reference = reference; }
 
     @Override
     public String code() { return name(); }
+
+    @Override
+    public String reference() { return reference; }
 }
 ```
+
+### Référence stable (`CTX-MOD-SEQ`)
+
+`code()` est symbolique : il sert aux `switch` exhaustifs et aux payloads API, mais il change de
+forme si la constante est renommée. `reference()` couvre un besoin différent — un identifiant
+**stable dans le temps** pour les logs, les tickets de support et les clés d'i18n, sous la forme
+`CTX-MOD-SEQ` (ex. `ORD-001-0003`) :
+
+- **`CTX`** — code de 3 lettres du bounded context, un par agrégat Maven (`ORD` pour
+  order-management). Assigné une fois pour toutes ; un nouveau bounded context prend son propre
+  préfixe pour que les références restent non ambiguës quand on les grep à l'échelle de toute la
+  plateforme.
+- **`MOD`** — id de module sur 3 chiffres, un par enum `ErrorCode` (donc un par module qui lance
+  ses propres erreurs, en miroir du principe "un enum par module"). Convention de plage :
+  `000-099` pour le cœur fonctionnel, `100-199` pour les adapters sortants (`order-persistence` =
+  `101`, `order-messaging-kafka` = `102`), `200-299` pour les adapters entrants (`order-api`,
+  pas encore utilisé). La plage seule indique donc si une référence est fonctionnelle ou
+  technique.
+- **`SEQ`** — séquence sur 4 chiffres, assignée en dur constante par constante (jamais dérivée
+  d'`ordinal()`, pour qu'un réordonnancement de l'enum ne change jamais silencieusement une
+  référence déjà présente dans un log). Append-only : un numéro n'est jamais réutilisé, même après
+  suppression de la constante qui le portait.
+
+`GlobalExceptionHandler` expose `reference()` dans le `ProblemDetail` (`problem.reference`) et
+dans le MDC (`errorReference`) aux côtés de `code`/`errorCode` et de l'`incidentId` : `reference`
+regroupe toutes les occurrences d'un même cas dans le temps (« combien de `ORD-101-0001` cette
+heure ? »), `incidentId` identifie une occurrence précise.
+
+Le format, l'unicité globale et le préfixe par module sont vérifiés au build par
+`ErrorCodeReferenceTest` (voir tests d'architecture plus bas) — pas seulement documentés.
 
 ### Cycle de vie d'une erreur fonctionnelle (exemple : commande introuvable)
 
@@ -123,16 +180,18 @@ public enum OrderErrorCode implements ErrorCode {
 4. `GlobalExceptionHandler.handleFunctional` l'intercepte, cast `ex.errorCode()` vers
    `OrderErrorCode` (légitime : `order-api` ne gère que le contexte "order" pour l'instant), et le
    switch exhaustif renvoie `HttpStatus.NOT_FOUND`.
-5. Le client reçoit un `ProblemDetail` (RFC 7807) 404 avec le message.
+5. Le client reçoit un `ProblemDetail` (RFC 7807) 404 avec le message, `code` et `reference`
+   (`ORD-001-0001`).
 
 ### Cycle de vie d'une panne technique (exemple : base de données indisponible)
 
 1. `OrderJpaRepository.save(...)` lève une `DataAccessException` (hiérarchie Spring Data).
 2. `OrderRepositoryAdapter` l'attrape via un helper privé partagé par ses 4 méthodes et relance
    `new TechnicalException(OrderPersistenceErrorCode.ORDER_PERSISTENCE_FAILURE, "...", cause)`.
-3. `GlobalExceptionHandler.handleTechnical` l'intercepte : log `ERROR` avec le code incident et la
-   cause complète (pour le support/l'observabilité), renvoie un `ProblemDetail` 500 **générique**
-   au client — jamais le détail brut de l'exception technique.
+3. `GlobalExceptionHandler.handleTechnical` l'intercepte : log `ERROR` avec `errorCode`,
+   `errorReference` et l'`incidentId` en MDC, plus la cause complète (pour le support/
+   l'observabilité), renvoie un `ProblemDetail` 500 **générique** au client — jamais le détail brut
+   de l'exception technique.
 
 ### Un vrai bug (ex. NullPointerException accidentelle)
 
@@ -148,12 +207,17 @@ jamais polluer une logique de retry/alerting qui se fierait à ce type.
 2. Ajouter la valeur dans l'enum du **module qui la lance** (créer un nouvel enum si c'est un
    nouveau module d'adapter qui n'en a pas encore). Ne jamais ajouter une valeur "au cas où" dans
    l'enum d'un autre module.
-3. Lancer `new FunctionalException(MonErrorCode.MA_VALEUR, message[, cause])` ou l'équivalent
+3. Lui assigner une référence `CTX-MOD-SEQ` : le même préfixe `CTX-MOD-` que les autres valeurs de
+   cet enum, et le prochain `SEQ` libre — jamais un numéro déjà utilisé, même par une valeur
+   supprimée depuis. `ErrorCodeReferenceTest` casse le build si le format est invalide, si la
+   référence est déjà utilisée ailleurs dans l'appli, ou si elle ne commence pas par le préfixe du
+   module.
+4. Lancer `new FunctionalException(MonErrorCode.MA_VALEUR, message[, cause])` ou l'équivalent
    `TechnicalException`.
-4. Si le cas est fonctionnel et exposé via l'API : ajouter le nouveau cas dans le switch exhaustif
+5. Si le cas est fonctionnel et exposé via l'API : ajouter le nouveau cas dans le switch exhaustif
    de `GlobalExceptionHandler` — le compilateur refusera de compiler tant que ce n'est pas fait, il
    n'y a rien à retenir manuellement.
-5. Ne jamais créer de nouvelle classe d'exception : le point 2 est toujours la bonne réponse.
+6. Ne jamais créer de nouvelle classe d'exception : le point 2 est toujours la bonne réponse.
 
 ### Alternatives envisagées et écartées
 
@@ -263,13 +327,41 @@ sur son classpath de test, puisque c'est son rôle d'assembler l'application ent
 | `onlyOneCentralizedExceptionHandlerMustExist` | Un second `@RestControllerAdvice` qui disperserait la gestion d'erreur. |
 | `onlyErrorKernelMayDefineNewExceptionTypes` | Un retour en arrière vers "une exception par cas d'usage" (`class XyzException extends RuntimeException` en dehors d'`error-kernel`). |
 | `apiMustNotDependOnPersistenceOrMessaging` | `order-api` qui utiliserait directement `OrderEntity`/`OrderJpaRepository` au lieu de passer par un port. |
+| `orderCoreMustNotDependOnPersistenceOrMessaging` | Le sens inverse du point 6 : un adapter a le droit de lancer un `ErrorCode` du cœur, mais `order-core` ne doit jamais importer un type d'adapter. |
 | `persistenceMustNotDependOnMessaging` | Un adapter qui dépendrait directement d'un autre adapter. |
 | `messagingMustNotDependOnPersistence` | Idem, sens inverse. |
 
-Les 4 dernières règles répondent directement à une faiblesse identifiée en construisant ce projet :
-avant elles, rien n'empêchait mécaniquement "n'importe qui" de réutiliser une classe d'un autre
-module (ex. `order-api` import direct d'`OrderEntity`) ou de recréer le pattern "exception par cas"
-qu'on a explicitement écarté — seule la documentation le disait.
+Les règles depuis `apiMustNotDependOnPersistenceOrMessaging` répondent directement à une faiblesse
+identifiée en construisant ce projet : avant elles, rien n'empêchait mécaniquement "n'importe qui"
+de réutiliser une classe d'un autre module (ex. `order-api` import direct d'`OrderEntity`) ou de
+recréer le pattern "exception par cas" qu'on a explicitement écarté — seule la documentation le
+disait.
+
+### Test de référence (`ErrorCodeReferenceTest`) — le format `CTX-MOD-SEQ` jamais contourné
+
+Trois propriétés de la référence stable (voir plus haut) ne sont vérifiables qu'en collectant
+toutes les valeurs de tous les enums `ErrorCode` de l'appli à la fois — un test JUnit classique
+plutôt qu'ArchUnit, mais qui vit au même endroit (`order-bootstrap`) pour la même raison : c'est le
+seul module avec chaque enum sur son classpath de test.
+
+```java
+class ErrorCodeReferenceTest {
+
+    @Test
+    void everyErrorCodeReferenceMatchesTheStandardFormat() { /* ^[A-Z]{3}-\d{3}-\d{4}$ */ }
+
+    @Test
+    void everyErrorCodeReferenceIsGloballyUnique() { /* aucune collision entre modules */ }
+
+    @Test
+    void eachModuleUsesASingleCtxModPrefix() { /* OrderErrorCode -> "ORD-001-", etc. */ }
+}
+```
+
+Nouvel enum `ErrorCode` dans un nouveau module d'adapter ? Il faut l'ajouter explicitement à la
+liste `ALL_ERROR_CODES` de ce test (délibérément pas de scan de classpath par réflexion, pour
+garder ce test sans dépendance supplémentaire) et lui donner son propre préfixe `CTX-MOD-` dans
+`eachModuleUsesASingleCtxModPrefix`.
 
 ## Build / vérification
 
