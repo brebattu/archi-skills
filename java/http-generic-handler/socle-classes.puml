@@ -1,0 +1,90 @@
+@startuml socle-partenaires-classes
+skinparam classAttributeIconSize 0
+title Socle technique d'appel partenaires — diagramme de classes
+
+enum ErrorCode {
+  PARTNER_TIMEOUT
+  PARTNER_5XX
+  PARTNER_RATE_LIMITED
+  PARTNER_4XX
+  PARTNER_UNAUTHORIZED
+  PARTNER_TECHNICAL
+  PARTNER_CIRCUIT_OPEN
+  .. codes maison ..
+  PARTNER_B_QUOTA
+}
+
+class TechnicalException {
+  - ErrorCode code
+  + getCode() : ErrorCode
+}
+class FunctionalException {
+  - ErrorCode code
+  + getCode() : ErrorCode
+}
+RuntimeException <|-- TechnicalException
+RuntimeException <|-- FunctionalException
+TechnicalException ..> ErrorCode
+FunctionalException ..> ErrorCode
+
+class PartnersProperties <<@ConfigurationProperties>> {
+  + Map<String, ClientConfig> clients
+}
+class ClientConfig {
+  + String baseUrl
+  + Duration connectTimeout
+  + Duration readTimeout
+  + Set<ErrorCode> retryableCodes
+  + Set<ErrorCode> circuitBreakerCodes
+  .. circuitBreakerCodes null -> défaut : toute TechnicalException compte ..
+}
+PartnersProperties +-- ClientConfig
+ClientConfig ..> ErrorCode
+
+abstract class AbstractPartnerClient {
+  # RestClient restClient
+  - Retry retry
+  - CircuitBreaker circuitBreaker
+  + AbstractPartnerClient(name, ClientConfig, RetryRegistry, CircuitBreakerRegistry)
+  # execute(Supplier<T>) : T
+  # executeNoRetry(Supplier<T>) : T
+  # handleError(HttpStatusCode, ClientHttpResponse) <<template method, overridable>>
+  # recordCircuitBreakerFailure(ErrorCode) <<pour handleError en mode passthrough>>
+  - loggingInterceptor(Logger) : ClientHttpRequestInterceptor
+  - StatusHandlerAdapter (inner, ResponseErrorHandler) : délègue à handleError
+}
+AbstractPartnerClient ..> ClientConfig
+AbstractPartnerClient ..> TechnicalException : throws
+AbstractPartnerClient ..> FunctionalException : throws
+AbstractPartnerClient ..> "Retry / CircuitBreaker\n(Resilience4j)" : décore
+
+class PartnerAClient <<@Component>> {
+  + getOrder(id) : OrderDto
+}
+class PartnerBClient <<@Component>> {
+  + getInvoice(ref) : InvoiceDto
+  # handleError(...) <<override>>
+}
+AbstractPartnerClient <|-- PartnerAClient
+AbstractPartnerClient <|-- PartnerBClient
+
+note right of PartnerBClient
+  Override de handleError, puis super.handleError(...) pour le reste :
+  422 + "QUOTA_EXCEEDED" -> TechnicalException(PARTNER_B_QUOTA)
+  404 -> ne lève rien (corps InvoiceDto renvoyé tel quel, "passthrough")
+end note
+
+note bottom of AbstractPartnerClient
+  Retry sélectif : predicate sur retryableCodes du partenaire.
+  Breaker sélectif : predicate sur circuitBreakerCodes du partenaire
+  (null -> toute TechnicalException compte, comportement par défaut).
+  Mapping HTTP->exception : une seule fois, dans handleError (template method).
+  Ne rien lever dans handleError = réponse traitée comme un succès.
+  Passthrough + breaker quand même informé : appeler recordCircuitBreakerFailure(code)
+  depuis un handleError qui ne lève rien.
+  Breaker OPEN -> CallNotPermittedException -> TechnicalException(PARTNER_CIRCUIT_OPEN),
+  détectable par l'appelant sans avoir touché le réseau.
+  loggingInterceptor : log method/URI/status/durée à chaque tentative HTTP.
+end note
+
+@enduml

@@ -1,0 +1,78 @@
+@startuml socle-partenaires-sequence
+title Flux execute() — retry, circuit breaker, mapping d'erreurs
+
+actor Appelant
+participant "PartnerXClient" as Client
+participant "AbstractPartnerClient\n.execute()" as Exec
+participant "Retry" as Retry
+participant "CircuitBreaker" as CB
+participant "RestClient" as RC
+participant "LoggingInterceptor" as LOG
+participant "handleError\n(template method)" as EH
+participant "Partenaire (API)" as API
+
+Appelant -> Client : getOrder(id)
+Client -> Exec : execute(supplier)
+Exec -> Retry : decorateSupplier
+Retry -> CB : decorateSupplier
+
+loop tentatives (max-attempts)
+  CB -> CB : état OPEN ?
+  alt circuit OPEN
+    CB --> Exec : CallNotPermittedException
+    note right of Exec : catchée dans runProtected()\n-> TechnicalException(PARTNER_CIRCUIT_OPEN)\ndétectable par l'appelant, sans appel réseau
+  else circuit CLOSED/HALF_OPEN
+    CB -> RC : GET /orders/{id}
+    RC -> LOG : intercept(request)
+    LOG -> API : requête HTTP
+    API --> LOG : réponse
+    LOG -> LOG : log INFO method/URI/status/durée\n(à chaque tentative)
+    LOG --> RC : réponse
+
+    alt statut d'erreur (4xx/5xx)
+      RC -> EH : handleError(status, response)
+      EH -> EH : override du partenaire ?
+      alt code maison géré
+        EH --> RC : throw TechnicalException(code maison)
+      else pas de match -> super.handleError(...)
+        note right of EH
+          5xx -> TechnicalException(PARTNER_5XX)
+          429 -> TechnicalException(PARTNER_RATE_LIMITED)
+          401/403 -> FunctionalException(PARTNER_UNAUTHORIZED)
+          autre 4xx -> FunctionalException(PARTNER_4XX)
+        end note
+        EH --> RC : throw Technical/FunctionalException
+      else override ne lève rien ("passthrough")
+        EH --> RC : retour normal (pas d'exception)
+      end
+      alt exception levée
+        RC --> CB : exception
+        CB -> CB : record si TechnicalException
+        CB --> Retry : exception
+        Retry -> Retry : retryable ? (ErrorCode dans Set partenaire)
+        alt retryable && tentatives restantes
+          Retry -> Retry : backoff exponentiel -> nouvelle tentative
+        else non retryable ou épuisé
+          Retry --> Exec : exception
+        end
+      else pas d'exception (passthrough)
+        RC --> CB : body désérialisé normalement
+        CB --> Retry : résultat
+        Retry --> Exec : résultat
+      end
+    else timeout / réseau (avant réponse)
+      LOG -> LOG : log WARN échec réseau + durée
+      RC --> Exec : ResourceAccessException
+      note right of Exec : catchée dans runProtected()\n-> TechnicalException(PARTNER_TIMEOUT)
+    else succès
+      RC --> CB : body désérialisé
+      CB --> Retry : résultat
+      Retry --> Exec : résultat
+    end
+  end
+end
+
+Exec --> Client : résultat ou exception métier
+Client --> Appelant : OrderDto / exception
+
+@enduml

@@ -1,0 +1,51 @@
+spring:
+  application:
+    name: http-generic-handler
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      retries: 3
+      acks: all
+      properties:
+        delivery.timeout.ms: 15000
+
+partners:
+  clients:
+    partnerA:
+      base-url: https://api.partner-a.com
+      connect-timeout: 3s
+      read-timeout: 5s
+      retryable-codes: [PARTNER_TIMEOUT, PARTNER_5XX, PARTNER_RATE_LIMITED]
+    partnerB:
+      base-url: https://api.partner-b.com
+      connect-timeout: 2s
+      read-timeout: 8s
+      retryable-codes: [PARTNER_TIMEOUT, PARTNER_5XX, PARTNER_B_QUOTA]  # B retry sur son quota
+      # circuit-breaker-codes est optionnel : absent ici -> TOUTE TechnicalException compte pour
+      # le breaker (comportement par défaut). Un partenaire peut restreindre la liste, ex. :
+      # circuit-breaker-codes: [PARTNER_5XX, PARTNER_B_QUOTA]
+
+resilience4j:
+  retry:
+    configs:
+      default:
+        max-attempts: 3
+        wait-duration: 500ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+    instances:
+      partnerA: { base-config: default }
+      partnerB: { base-config: default, max-attempts: 5 }
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+    instances:
+      partnerA: { base-config: default }
+      partnerB: { base-config: default }
+      kafka-producer: { base-config: default }
